@@ -25,23 +25,112 @@ export interface Env {
 
 const app = new Hono()
 
-app.get('/', (c) => {
-	// return c.text("Hello World!")
-	return new Response("Hello World!");
+// app.get('/', (c) => {
+// 	// return c.text("Hello World!")
+// 	return new Response("Hello World!");
+// })
+
+// app.get('/json', (c) => {
+// 	return c.json({ hoge: 'fuga'});
+// })
+
+// 別のドメインでもなんでもいける
+app.get('/example', () => {
+	return fetch('https://example.com')
 })
 
-app.get('/json', (c) => {
-	return c.json({ hoge: 'fuga'});
+// レスポンスのHTMLの書き換え
+app.get('/rewrite', async () => {
+	const rewriter = new HTMLRewriter()
+	const res = await fetch('https://example.com')
+	rewriter.on('h1', { element: (e) => { e.setInnerContent('Test') } })
+	return rewriter.transform(res)
 })
 
-export default app
+// キャッシュ
+app.get('/api/cache', async (c) => {
+	// これでcloudflare workersのキャッシュAPIにアクセス可能
+	const cache = caches.default
+	const url = new URL(c.req.url)
+	url.port = '3000'
+	const matched = await cache.match(url)
+	if (matched) return matched
 
-// export default {
-// 	async fetch(
-// 		request: Request,
-// 		env: Env,
-// 		ctx: ExecutionContext
-// 	): Promise<Response> {
-// 		return new Response("Hello World!");
-// 	},
-// };
+	const res = await fetch(
+		url,
+		{
+			headers: c.req.headers,
+			body: c.req.body,
+			// cloudflare workersだけのオプションを渡せる
+			// 基本的にキャッシュキーはURL
+			// proxy設定ちゃんとしないと動かないらしい?
+			cf: {
+				cacheTtl: 30,
+			}
+		},
+	)
+	const clonedRes = res.clone()
+	// clonedRes.headers.set('Cache-Control', 'max-age=30')
+	clonedRes.headers.set('Cache-Control', 's-maxage=30')
+	// Cache-Controlはweb api。cloudflareもそれに沿っている
+	// キャッシュしているのはworkers内
+	cache.put(url, clonedRes)
+	// cache.put(new Request(url), res)
+	return clonedRes
+})
+
+// ABテスト
+// どっちに行ったかはアクセスログで見れる
+app.get('/ab/page', async (c) => {
+	const url = new URL(c.req.url)
+	url.port = '3000'
+	const abPath = c.req.cookie('ab')
+
+	if (abPath) {
+		url.pathname = abPath
+	} else {
+		url.pathname = Math.random() < 0.5 ? '/ab/page-a' : '/ab/page-b'
+	}
+
+	const res = await fetch(url, { headers: c.req.headers, body: c.req.body })
+	// read onlyなので
+	const clonedRes = res.clone()
+	// abは適当。本番では使わない
+	clonedRes.headers.set('Set-Cookie', `ab=${url.pathname}`)
+	return clonedRes
+})
+
+// 処理をブロックせずにレスポンスを返す(バックグラウンドで処理は行われる)
+app.get('/async', async (c) => {
+	const url = new URL(c.req.url)
+	url.port = '3000'
+	url.pathname = '/api/heavy'
+	const handler: Promise<void> = new Promise(() => {
+		fetch(url)
+	})
+	// honoでこれにアクセスする方法
+	// https://developer.mozilla.org/ja/docs/Web/API/ExtendableEvent/waitUntil
+	c.executionCtx.waitUntil(handler)
+	return c.text('OK!')
+})
+
+// オリジンサーバーの情報を取得
+app.all('*', (c) => {
+	// c.req.url // http://localhost:8787/json
+	const url = new URL(c.req.url)
+	url.port = '3000'
+	// honoは独自のrequestオブジェクトなのでこのように渡す
+	return fetch(url, { headers: c.req.headers, body: c.req.body })
+})
+
+export default {
+	async fetch(
+		req: Request,
+		_env: Env,
+		ctx: ExecutionContext
+	): Promise<Response> {
+		// なんかしら例外起きた時は、オリジンサーバーに問い合わせる
+		ctx.passThroughOnException()
+		return app.fetch(req)
+	},
+};

@@ -1,7 +1,19 @@
+import type { LoaderFunction } from "@remix-run/cloudflare";
+import { json } from "@remix-run/cloudflare";
+import { useLoaderData } from "@remix-run/react";
+
+export const loader: LoaderFunction = () => {
+  return json({
+    test: 'hoge'
+  })
+}
+
 export default function Index() {
+  const { test } = useLoaderData<typeof loader>()
+
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", lineHeight: "1.4" }}>
-      <h1>Welcome to Remix</h1>
+      <h1>Welcome to Remix {test}</h1>
       <ul>
         <li>
           <a
